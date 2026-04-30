@@ -12,7 +12,13 @@ jobs:
 
       - name: Prep Project
         run: |
-          unzip app.zip
+          # السطر ده هيدور على أي ملف zip ويفكه مهما كان اسمه
+          unzip *.zip || echo "مالقتش ملفات zip يا محمد!"
+          
+          # بنجبره يشوف الملفات اللي اتفكت
+          ls -la
+          
+          # تثبيت المكتبات
           npm install --legacy-peer-deps
           npm run build
           npx cap add android
