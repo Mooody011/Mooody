@@ -10,29 +10,40 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: 'temurin', java-version: '17' }
 
-      - name: Prep Project
+      - name: Extract Files
         run: |
-          # السطر ده هيدور على أي ملف zip ويفكه مهما كان اسمه
-          unzip *.zip || echo "مالقتش ملفات zip يا محمد!"
-          
-          # بنجبره يشوف الملفات اللي اتفكت
-          ls -la
-          
-          # تثبيت المكتبات
-          npm install --legacy-peer-deps
-          npm run build
-          npx cap add android
-          npx cap sync android
+          # فك ضغط أي ملف zip موجود في المستودع
+          unzip -o *.zip -d .
+          # التأكد من أن الملفات في المكان الصحيح (السطر ده بيطلع كل الملفات عشان نتأكد)
+          ls -R
 
-      - name: Build APK
+      - name: Install and Build Project
         run: |
-          cd android
-          chmod +x gradlew
-          ./gradlew assembleDebug
+          # التأكد من وجود ملف package.json قبل البدء
+          if [ -f "package.json" ]; then
+            npm install --legacy-peer-deps
+            npm run build
+            npx cap add android || echo "Android already added"
+            npx cap sync android
+          else
+            echo "Error: package.json missing! Check your zip file."
+            exit 1
+          fi
 
-      - name: Upload Result
+      - name: Build Android APK
+        run: |
+          if [ -d "android" ]; then
+            cd android
+            chmod +x gradlew
+            ./gradlew assembleDebug
+          else
+            echo "Error: Android folder not generated!"
+            exit 1
+          fi
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Mohamed-APK
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: "android/app/build/outputs/apk/debug/*.apk"
           
