@@ -1,0 +1,32 @@
+name: Build My App
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: actions/setup-java@v4
+        with: { distribution: 'temurin', java-version: '17' }
+
+      - name: Prep Project
+        run: |
+          unzip app.zip
+          npm install --legacy-peer-deps
+          npm run build
+          npx cap add android
+          npx cap sync android
+
+      - name: Build APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload Result
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mohamed-APK
+          path: android/app/build/outputs/apk/debug/*.apk
+          
