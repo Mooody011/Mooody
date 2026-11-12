@@ -1,4 +1,4 @@
-name: Build Pro Athan APK (Single-File Workflow)
+name: Build Pro Athan APK
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: 4. Initialize Flutter Project & Dependencies
+      - name: 4. Initialize Project & Dependencies
         run: |
           flutter create --platforms=android --org com.ashour.athanpro athan_pro
           cd athan_pro
@@ -47,7 +47,7 @@ jobs:
             adhan: ^2.0.0+1
             geolocator: ^11.0.0
             shared_preferences: ^2.2.3
-            intl: ^0.19.0
+            intl: any
             flutter_local_notifications: ^17.2.2
             timezone: ^0.9.4
 
@@ -61,20 +61,18 @@ jobs:
 
           flutter pub get
 
-      - name: 5. Generate Offline Audio & Patch Android Configuration
+      - name: 5. Generate Audio & Patch Android Config
         run: |
           cd athan_pro
           python3 - << 'EOF'
           import os, wave, struct, math, re
 
-          # 1. Generate clean harmonic notification sound (WAV) in res/raw
           raw_dir = "android/app/src/main/res/raw"
           os.makedirs(raw_dir, exist_ok=True)
           wav_path = os.path.join(raw_dir, "athan_alert.wav")
 
           sample_rate = 44100
-          duration_sec = 4.0
-          total_samples = int(sample_rate * duration_sec)
+          total_samples = int(sample_rate * 4.0)
 
           with wave.open(wav_path, 'w') as wav_file:
               wav_file.setnchannels(1)
@@ -82,20 +80,11 @@ jobs:
               wav_file.setframerate(sample_rate)
               for i in range(total_samples):
                   t = i / sample_rate
-                  # Gentle chime progression (A4 -> C#5 -> E5)
-                  if t < 1.2:
-                      freq = 440.0
-                  elif t < 2.4:
-                      freq = 554.37
-                  else:
-                      freq = 659.25
+                  freq = 440.0 if t < 1.2 else (554.37 if t < 2.4 else 659.25)
                   envelope = math.exp(-1.5 * (t % 1.2))
                   val = int(16000 * envelope * math.sin(2 * math.pi * freq * t))
                   wav_file.writeframesraw(struct.pack('<h', val))
 
-          print("Generated raw audio:", wav_path)
-
-          # 2. Patch AndroidManifest.xml with Permissions & Notification Receivers
           manifest_path = "android/app/src/main/AndroidManifest.xml"
           with open(manifest_path, "r", encoding="utf-8") as f:
               manifest = f.read()
@@ -131,27 +120,21 @@ jobs:
           with open(manifest_path, "w", encoding="utf-8") as f:
               f.write(manifest)
 
-          # 3. Patch build.gradle for CoreLibraryDesugaring & MultiDex
           gradle_groovy = "android/app/build.gradle"
           if os.path.exists(gradle_groovy):
               with open(gradle_groovy, "r", encoding="utf-8") as f:
                   g = f.read()
-
-              g = re.sub(r"minSdk\s+.*", "minSdk 21\n        multiDexEnabled true", g)
-              g = re.sub(r"minSdkVersion\s+.*", "minSdkVersion 21\n        multiDexEnabled true", g)
-
+              g = re.sub(r"compileSdk\s*=?\s*flutter\.compileSdkVersion", "compileSdk = 34", g)
+              g = re.sub(r"minSdk\s*=?\s*flutter\.minSdkVersion", "minSdk = 21\n        multiDexEnabled = true", g)
               if "coreLibraryDesugaringEnabled" not in g:
-                  g = g.replace("compileOptions {", "compileOptions {\n        coreLibraryDesugaringEnabled true", 1)
-
+                  g = g.replace("compileOptions {", "compileOptions {\n        coreLibraryDesugaringEnabled = true", 1)
               if "desugar_jdk_libs" not in g:
                   g += "\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'\n}\n"
-
               with open(gradle_groovy, "w", encoding="utf-8") as f:
                   f.write(g)
-              print("Patched Groovy build.gradle successfully.")
           EOF
 
-      - name: 6. Write Complete Application Code (lib/main.dart)
+      - name: 6. Write Dart Code & Build Release APK
         run: |
           cd athan_pro
           cat << 'EOF' > lib/main.dart
@@ -250,7 +233,6 @@ jobs:
 
           class _MainHomeScreenState extends State<MainHomeScreen> {
             int _selectedIndex = 0;
-
             double _lat = 29.9773;
             double _lng = 31.0946;
             String _locationTitle = 'الجيزة - حدائق الأهرام / أكتوبر';
@@ -274,11 +256,7 @@ jobs:
               super.initState();
               _loadPreferencesAndCalculate();
               _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-                if (mounted) {
-                  setState(() {
-                    _now = DateTime.now();
-                  });
-                }
+                if (mounted) setState(() => _now = DateTime.now());
               });
             }
 
@@ -327,7 +305,6 @@ jobs:
                 case 'karachi':
                   params = CalculationMethod.karachi.getParameters();
                   break;
-                case 'egyptian':
                 default:
                   params = CalculationMethod.egyptian.getParameters();
                   break;
@@ -346,10 +323,8 @@ jobs:
               final coords = Coordinates(_lat, _lng);
               final params = _buildCalcParams();
               final dateComponents = DateComponents.from(_selectedDate);
-              final prayers = PrayerTimes(coords, dateComponents, params);
-
               setState(() {
-                _todayPrayers = prayers;
+                _todayPrayers = PrayerTimes(coords, dateComponents, params);
               });
 
               if (_notificationsEnabled) {
@@ -426,20 +401,15 @@ jobs:
               setState(() => _isLoadingGps = true);
               try {
                 bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-                if (!serviceEnabled) {
-                  throw 'خدمة الموقع (GPS) غير مفعلة في الهاتف';
-                }
+                if (!serviceEnabled) throw 'خدمة الموقع (GPS) غير مفعلة';
                 LocationPermission permission = await Geolocator.checkPermission();
                 if (permission == LocationPermission.denied) {
                   permission = await Geolocator.requestPermission();
-                  if (permission == LocationPermission.denied) {
-                    throw 'تم رفض صلاحية الوصول للموقع';
-                  }
+                  if (permission == LocationPermission.denied) throw 'تم رفض صلاحية الموقع';
                 }
                 if (permission == LocationPermission.deniedForever) {
-                  throw 'صلاحية الموقع مرفوضة دائماً من الإعدادات';
+                  throw 'صلاحية الموقع مرفوضة دائماً';
                 }
-
                 final pos = await Geolocator.getCurrentPosition(
                   desiredAccuracy: LocationAccuracy.high,
                 );
@@ -451,11 +421,6 @@ jobs:
                 });
                 await _savePreferences();
                 _recalculatePrayers();
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('تم تحديث الإحداثيات والمواقيت عبر الـ GPS بنجاح')),
-                  );
-                }
               } catch (e) {
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -478,4 +443,33 @@ jobs:
                 {'name': 'الظهر', 'time': nowPrayers.dhuhr},
                 {'name': 'العصر', 'time': nowPrayers.asr},
                 {'name': 'المغرب', 'time': nowPrayers.maghrib},
-           
+                {'name': 'العشاء', 'time': nowPrayers.isha},
+              ];
+
+              for (final item in sequence) {
+                final t = item['time'] as DateTime;
+                if (t.isAfter(_now)) {
+                  return {'name': item['name'], 'time': t, 'diff': t.difference(_now)};
+                }
+              }
+
+              final tomorrow = _now.add(const Duration(days: 1));
+              final tomorrowPrayers =
+                  PrayerTimes(coords, DateComponents.from(tomorrow), params);
+              return {
+                'name': 'الفجر (غداً)',
+                'time': tomorrowPrayers.fajr,
+                'diff': tomorrowPrayers.fajr.difference(_now),
+              };
+            }
+
+            String _formatDuration(Duration d) {
+              final h = d.inHours.toString().padLeft(2, '0');
+              final m = (d.inMinutes % 60).toString().padLeft(2, '0');
+              final s = (d.inSeconds % 60).toString().padLeft(2, '0');
+              return '$h:$m:$s';
+            }
+
+            @override
+            Widget build(BuildContext context) {
+            
