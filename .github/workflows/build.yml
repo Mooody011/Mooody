@@ -1,49 +1,481 @@
-name: Build My App
-on: [push, workflow_dispatch]
+name: Build Pro Athan APK (Single-File Workflow)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
 jobs:
-  build:
+  build-apk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - uses: actions/setup-java@v4
-        with: { distribution: 'temurin', java-version: '17' }
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Extract Files
-        run: |
-          # فك ضغط أي ملف zip موجود في المستودع
-          unzip -o *.zip -d .
-          # التأكد من أن الملفات في المكان الصحيح (السطر ده بيطلع كل الملفات عشان نتأكد)
-          ls -R
-
-      - name: Install and Build Project
-        run: |
-          # التأكد من وجود ملف package.json قبل البدء
-          if [ -f "package.json" ]; then
-            npm install --legacy-peer-deps
-            npm run build
-            npx cap add android || echo "Android already added"
-            npx cap sync android
-          else
-            echo "Error: package.json missing! Check your zip file."
-            exit 1
-          fi
-
-      - name: Build Android APK
-        run: |
-          if [ -d "android" ]; then
-            cd android
-            chmod +x gradlew
-            ./gradlew assembleDebug
-          else
-            echo "Error: Android folder not generated!"
-            exit 1
-          fi
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+      - name: 2. Setup Java 17
+        uses: actions/setup-java@v4
         with:
-          name: Mohamed-APK
-          path: "android/app/build/outputs/apk/debug/*.apk"
-          
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 3. Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.3'
+          channel: 'stable'
+          cache: true
+
+      - name: 4. Initialize Flutter Project & Dependencies
+        run: |
+          flutter create --platforms=android --org com.ashour.athanpro athan_pro
+          cd athan_pro
+
+          cat << 'EOF' > pubspec.yaml
+          name: athan_pro
+          description: Advanced Offline Athan & Prayer Times App
+          publish_to: 'none'
+          version: 2.0.0+1
+
+          environment:
+            sdk: '>=3.2.0 <4.0.0'
+
+          dependencies:
+            flutter:
+              sdk: flutter
+            flutter_localizations:
+              sdk: flutter
+            adhan: ^2.0.0+1
+            geolocator: ^11.0.0
+            shared_preferences: ^2.2.3
+            intl: ^0.19.0
+            flutter_local_notifications: ^17.2.2
+            timezone: ^0.9.4
+
+          dev_dependencies:
+            flutter_test:
+              sdk: flutter
+
+          flutter:
+            uses-material-design: true
+          EOF
+
+          flutter pub get
+
+      - name: 5. Generate Offline Audio & Patch Android Configuration
+        run: |
+          cd athan_pro
+          python3 - << 'EOF'
+          import os, wave, struct, math, re
+
+          # 1. Generate clean harmonic notification sound (WAV) in res/raw
+          raw_dir = "android/app/src/main/res/raw"
+          os.makedirs(raw_dir, exist_ok=True)
+          wav_path = os.path.join(raw_dir, "athan_alert.wav")
+
+          sample_rate = 44100
+          duration_sec = 4.0
+          total_samples = int(sample_rate * duration_sec)
+
+          with wave.open(wav_path, 'w') as wav_file:
+              wav_file.setnchannels(1)
+              wav_file.setsampwidth(2)
+              wav_file.setframerate(sample_rate)
+              for i in range(total_samples):
+                  t = i / sample_rate
+                  # Gentle chime progression (A4 -> C#5 -> E5)
+                  if t < 1.2:
+                      freq = 440.0
+                  elif t < 2.4:
+                      freq = 554.37
+                  else:
+                      freq = 659.25
+                  envelope = math.exp(-1.5 * (t % 1.2))
+                  val = int(16000 * envelope * math.sin(2 * math.pi * freq * t))
+                  wav_file.writeframesraw(struct.pack('<h', val))
+
+          print("Generated raw audio:", wav_path)
+
+          # 2. Patch AndroidManifest.xml with Permissions & Notification Receivers
+          manifest_path = "android/app/src/main/AndroidManifest.xml"
+          with open(manifest_path, "r", encoding="utf-8") as f:
+              manifest = f.read()
+
+          permissions_block = """
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+              <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+              <uses-permission android:name="android.permission.VIBRATE"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
+          """
+          manifest = manifest.replace("<application", permissions_block + "\n    <application", 1)
+
+          receivers_block = """
+                  <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" />
+                  <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                          <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+                          <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                          <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
+                      </intent-filter>
+                  </receiver>
+              </application>
+          """
+          manifest = manifest.replace("</application>", receivers_block, 1)
+          manifest = manifest.replace('android:label="athan_pro"', 'android:label="مواقيت الأذان"')
+
+          with open(manifest_path, "w", encoding="utf-8") as f:
+              f.write(manifest)
+
+          # 3. Patch build.gradle for CoreLibraryDesugaring & MultiDex
+          gradle_groovy = "android/app/build.gradle"
+          if os.path.exists(gradle_groovy):
+              with open(gradle_groovy, "r", encoding="utf-8") as f:
+                  g = f.read()
+
+              g = re.sub(r"minSdk\s+.*", "minSdk 21\n        multiDexEnabled true", g)
+              g = re.sub(r"minSdkVersion\s+.*", "minSdkVersion 21\n        multiDexEnabled true", g)
+
+              if "coreLibraryDesugaringEnabled" not in g:
+                  g = g.replace("compileOptions {", "compileOptions {\n        coreLibraryDesugaringEnabled true", 1)
+
+              if "desugar_jdk_libs" not in g:
+                  g += "\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'\n}\n"
+
+              with open(gradle_groovy, "w", encoding="utf-8") as f:
+                  f.write(g)
+              print("Patched Groovy build.gradle successfully.")
+          EOF
+
+      - name: 6. Write Complete Application Code (lib/main.dart)
+        run: |
+          cd athan_pro
+          cat << 'EOF' > lib/main.dart
+          import 'dart:async';
+          import 'dart:math' as math;
+          import 'package:flutter/material.dart';
+          import 'package:flutter_localizations/flutter_localizations.dart';
+          import 'package:adhan/adhan.dart';
+          import 'package:geolocator/geolocator.dart';
+          import 'package:shared_preferences/shared_preferences.dart';
+          import 'package:intl/intl.dart';
+          import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+          import 'package:timezone/data/latest_all.dart' as tz;
+          import 'package:timezone/timezone.dart' as tz;
+
+          final FlutterLocalNotificationsPlugin notificationsPlugin =
+              FlutterLocalNotificationsPlugin();
+
+          Future<void> main() async {
+            WidgetsFlutterBinding.ensureInitialized();
+            tz.initializeTimeZones();
+            await _initNotifications();
+            runApp(const AthanProApp());
+          }
+
+          Future<void> _initNotifications() async {
+            const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+            const initSettings = InitializationSettings(android: androidSettings);
+            await notificationsPlugin.initialize(initSettings);
+
+            final androidPlugin = notificationsPlugin
+                .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+            if (androidPlugin != null) {
+              await androidPlugin.requestNotificationsPermission();
+              await androidPlugin.requestExactAlarmsPermission();
+            }
+          }
+
+          class CityPreset {
+            final String name;
+            final double lat;
+            final double lng;
+            const CityPreset(this.name, this.lat, this.lng);
+          }
+
+          const List<CityPreset> kPresetCities = [
+            CityPreset('الجيزة - حدائق الأهرام / أكتوبر', 29.9773, 31.0946),
+            CityPreset('القاهرة الكبرى', 30.0444, 31.2357),
+            CityPreset('الإسكندرية', 31.2001, 29.9187),
+            CityPreset('المنصورة', 31.0409, 31.3785),
+            CityPreset('طنطا', 30.7865, 31.0004),
+            CityPreset('أسيوط', 27.1783, 31.1859),
+            CityPreset('أسوان', 24.0889, 32.8998),
+            CityPreset('مكة المكرمة', 21.4225, 39.8262),
+            CityPreset('المدينة المنورة', 24.4672, 39.6112),
+          ];
+
+          class AthanProApp extends StatelessWidget {
+            const AthanProApp({super.key});
+
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                debugShowCheckedModeBanner: false,
+                title: 'مواقيت الأذان',
+                locale: const Locale('ar', 'EG'),
+                supportedLocales: const [Locale('ar', 'EG')],
+                localizationsDelegates: const [
+                  GlobalMaterialLocalizations.delegate,
+                  GlobalWidgetsLocalizations.delegate,
+                  GlobalCupertinoLocalizations.delegate,
+                ],
+                theme: ThemeData(
+                  useMaterial3: true,
+                  brightness: Brightness.dark,
+                  scaffoldBackgroundColor: const Color(0xFF0B1612),
+                  colorScheme: ColorScheme.fromSeed(
+                    seedColor: const Color(0xFF10B981),
+                    brightness: Brightness.dark,
+                    primary: const Color(0xFF10B981),
+                    secondary: const Color(0xFFD97706),
+                    surface: const Color(0xFF13261F),
+                  ),
+                ),
+                home: const MainHomeScreen(),
+              );
+            }
+          }
+
+          class MainHomeScreen extends StatefulWidget {
+            const MainHomeScreen({super.key});
+
+            @override
+            State<MainHomeScreen> createState() => _MainHomeScreenState();
+          }
+
+          class _MainHomeScreenState extends State<MainHomeScreen> {
+            int _selectedIndex = 0;
+
+            double _lat = 29.9773;
+            double _lng = 31.0946;
+            String _locationTitle = 'الجيزة - حدائق الأهرام / أكتوبر';
+            String _calcMethodKey = 'egyptian';
+            String _madhabKey = 'shafi';
+            int _manualOffsetMinutes = 0;
+            bool _notificationsEnabled = true;
+            bool _isLoadingGps = false;
+
+            PrayerTimes? _todayPrayers;
+            DateTime _selectedDate = DateTime.now();
+            Timer? _clockTimer;
+            DateTime _now = DateTime.now();
+
+            int _tasbihCount = 0;
+            int _tasbihTotal = 0;
+            String _currentZekr = 'سبحان الله وبحمده';
+
+            @override
+            void initState() {
+              super.initState();
+              _loadPreferencesAndCalculate();
+              _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+                if (mounted) {
+                  setState(() {
+                    _now = DateTime.now();
+                  });
+                }
+              });
+            }
+
+            @override
+            void dispose() {
+              _clockTimer?.cancel();
+              super.dispose();
+            }
+
+            Future<void> _loadPreferencesAndCalculate() async {
+              final prefs = await SharedPreferences.getInstance();
+              setState(() {
+                _lat = prefs.getDouble('lat') ?? 29.9773;
+                _lng = prefs.getDouble('lng') ?? 31.0946;
+                _locationTitle = prefs.getString('loc_title') ?? 'الجيزة - حدائق الأهرام / أكتوبر';
+                _calcMethodKey = prefs.getString('calc_method') ?? 'egyptian';
+                _madhabKey = prefs.getString('madhab') ?? 'shafi';
+                _manualOffsetMinutes = prefs.getInt('offset_min') ?? 0;
+                _notificationsEnabled = prefs.getBool('notif_enabled') ?? true;
+                _tasbihTotal = prefs.getInt('tasbih_total') ?? 0;
+              });
+              _recalculatePrayers();
+            }
+
+            Future<void> _savePreferences() async {
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setDouble('lat', _lat);
+              await prefs.setDouble('lng', _lng);
+              await prefs.setString('loc_title', _locationTitle);
+              await prefs.setString('calc_method', _calcMethodKey);
+              await prefs.setString('madhab', _madhabKey);
+              await prefs.setInt('offset_min', _manualOffsetMinutes);
+              await prefs.setBool('notif_enabled', _notificationsEnabled);
+              await prefs.setInt('tasbih_total', _tasbihTotal);
+            }
+
+            CalculationParameters _buildCalcParams() {
+              CalculationParameters params;
+              switch (_calcMethodKey) {
+                case 'umm_al_qura':
+                  params = CalculationMethod.umm_al_qura.getParameters();
+                  break;
+                case 'mwl':
+                  params = CalculationMethod.muslim_world_league.getParameters();
+                  break;
+                case 'karachi':
+                  params = CalculationMethod.karachi.getParameters();
+                  break;
+                case 'egyptian':
+                default:
+                  params = CalculationMethod.egyptian.getParameters();
+                  break;
+              }
+              params.madhab = _madhabKey == 'hanafi' ? Madhab.hanafi : Madhab.shafi;
+              params.adjustments.fajr = _manualOffsetMinutes;
+              params.adjustments.sunrise = _manualOffsetMinutes;
+              params.adjustments.dhuhr = _manualOffsetMinutes;
+              params.adjustments.asr = _manualOffsetMinutes;
+              params.adjustments.maghrib = _manualOffsetMinutes;
+              params.adjustments.isha = _manualOffsetMinutes;
+              return params;
+            }
+
+            void _recalculatePrayers() {
+              final coords = Coordinates(_lat, _lng);
+              final params = _buildCalcParams();
+              final dateComponents = DateComponents.from(_selectedDate);
+              final prayers = PrayerTimes(coords, dateComponents, params);
+
+              setState(() {
+                _todayPrayers = prayers;
+              });
+
+              if (_notificationsEnabled) {
+                _scheduleUpcomingNotifications(coords, params);
+              } else {
+                notificationsPlugin.cancelAll();
+              }
+            }
+
+            Future<void> _scheduleUpcomingNotifications(
+                Coordinates coords, CalculationParameters params) async {
+              await notificationsPlugin.cancelAll();
+              final now = DateTime.now();
+              final todayPrayers = PrayerTimes(coords, DateComponents.from(now), params);
+
+              final Map<int, Map<String, dynamic>> items = {
+                101: {'name': 'الفجر', 'time': todayPrayers.fajr},
+                102: {'name': 'الظهر', 'time': todayPrayers.dhuhr},
+                103: {'name': 'العصر', 'time': todayPrayers.asr},
+                104: {'name': 'المغرب', 'time': todayPrayers.maghrib},
+                105: {'name': 'العشاء', 'time': todayPrayers.isha},
+              };
+
+              const androidDetails = AndroidNotificationDetails(
+                'athan_channel_v2',
+                'تنبيهات الأذان',
+                channelDescription: 'تنبيهات مواقيت الصلاة الخمس',
+                importance: Importance.max,
+                priority: Priority.high,
+                playSound: true,
+                sound: RawResourceAndroidNotificationSound('athan_alert'),
+              );
+              const details = NotificationDetails(android: androidDetails);
+
+              for (final entry in items.entries) {
+                final DateTime prayerTime = entry.value['time'] as DateTime;
+                if (prayerTime.isAfter(now)) {
+                  final scheduledTz = tz.TZDateTime.from(prayerTime, tz.local);
+                  try {
+                    await notificationsPlugin.zonedSchedule(
+                      entry.key,
+                      'حان الآن موعد أذان ${entry.value['name']}',
+                      'حي على الصلاة - بتوقيت $_locationTitle',
+                      scheduledTz,
+                      details,
+                      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+                      uiLocalNotificationDateInterpretation:
+                          UILocalNotificationDateInterpretation.absoluteTime,
+                    );
+                  } catch (_) {}
+                }
+              }
+            }
+
+            Future<void> _testImmediateNotification() async {
+              const androidDetails = AndroidNotificationDetails(
+                'athan_channel_v2',
+                'تنبيهات الأذان',
+                channelDescription: 'تنبيهات مواقيت الصلاة الخمس',
+                importance: Importance.max,
+                priority: Priority.high,
+                playSound: true,
+                sound: RawResourceAndroidNotificationSound('athan_alert'),
+              );
+              await notificationsPlugin.show(
+                999,
+                'اختبار صوت الأذان والتنبيه',
+                'التنبيه الصوتي يعمل بنجاح على جهازك',
+                const NotificationDetails(android: androidDetails),
+              );
+            }
+
+            Future<void> _detectGpsLocation() async {
+              setState(() => _isLoadingGps = true);
+              try {
+                bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+                if (!serviceEnabled) {
+                  throw 'خدمة الموقع (GPS) غير مفعلة في الهاتف';
+                }
+                LocationPermission permission = await Geolocator.checkPermission();
+                if (permission == LocationPermission.denied) {
+                  permission = await Geolocator.requestPermission();
+                  if (permission == LocationPermission.denied) {
+                    throw 'تم رفض صلاحية الوصول للموقع';
+                  }
+                }
+                if (permission == LocationPermission.deniedForever) {
+                  throw 'صلاحية الموقع مرفوضة دائماً من الإعدادات';
+                }
+
+                final pos = await Geolocator.getCurrentPosition(
+                  desiredAccuracy: LocationAccuracy.high,
+                );
+                setState(() {
+                  _lat = pos.latitude;
+                  _lng = pos.longitude;
+                  _locationTitle =
+                      'موقعي عبر GPS (${_lat.toStringAsFixed(3)}, ${_lng.toStringAsFixed(3)})';
+                });
+                await _savePreferences();
+                _recalculatePrayers();
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('تم تحديث الإحداثيات والمواقيت عبر الـ GPS بنجاح')),
+                  );
+                }
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('تعذر جلب الـ GPS: $e')),
+                  );
+                }
+              } finally {
+                if (mounted) setState(() => _isLoadingGps = false);
+              }
+            }
+
+            Map<String, dynamic> _getNextPrayerData() {
+              final coords = Coordinates(_lat, _lng);
+              final params = _buildCalcParams();
+              final nowPrayers = PrayerTimes(coords, DateComponents.from(_now), params);
+
+              final sequence = [
+                {'name': 'الفجر', 'time': nowPrayers.fajr},
+                {'name': 'الشروق', 'time': nowPrayers.sunrise},
+                {'name': 'الظهر', 'time': nowPrayers.dhuhr},
+                {'name': 'العصر', 'time': nowPrayers.asr},
+                {'name': 'المغرب', 'time': nowPrayers.maghrib},
+           
